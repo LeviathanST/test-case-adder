@@ -1,6 +1,5 @@
-use std::{env, fs, str::FromStr};
+use std::{env, fs, path::Path, str::FromStr};
 
-use anyhow::Context;
 use once_cell::sync::Lazy;
 use sqlx::PgPool;
 use tracing_subscriber::prelude::*;
@@ -23,43 +22,74 @@ pub static DATABASE_URL: Lazy<String> = Lazy::new(|| {
     )
 });
 
+pub static QUESTION_ID: Lazy<String> = Lazy::new(|| {
+    env_or_default(
+        "QUESTION_ID",
+        "0354ea4d-0921-4391-b241-c2f9af72bbfa".to_string(),
+    )
+});
+
+pub static TEST_PATH: Lazy<String> = Lazy::new(|| {
+    env_or_default(
+        "TEST_PATH",
+        "D:\\Workplace\\CLB F-code\\BE_RODE\\Đề\\BE\\3_KETBAN\\Test".to_string(),
+    )
+});
+
 #[derive(Debug)]
-struct TestCase {
+pub struct TestCase {
     input: String,
     output: String,
     is_visible: bool,
     question_id: Uuid,
 }
-impl FromStr for TestCase {
-    type Err = anyhow::Error;
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s
-            .split_once("input:")
-            .context("Failed to remove first line")?
-            .1;
+impl TestCase {
+    fn get_testcase_from_dir(
+        path: &str,
+        quesiton_id: &str,
+        extension: bool,
+    ) -> Result<Vec<TestCase>, anyhow::Error> {
+        let in_dir = Path::new(path).join("in");
+        let out_dir = Path::new(path).join("out");
+        let mut count: i8 = 0;
+        let mut test_cases = Vec::new();
+        println!("{:?}", in_dir);
 
-        let (input, s) = s.split_once("output:").context("Failed to get input")?;
-        let (output, s) = s.split_once("isVisible:").context("Failed to get output")?;
-        let (is_visible, question_id) = s
-            .split_once("question_id:")
-            .context("Failed to get is_visible")?;
+        let in_files = fs::read_dir(in_dir).expect("Cannot open input files!");
+        for file in in_files {
+            count += 1;
+            let mut is_visible: bool = false;
+            if count <= 3 {
+                is_visible = true;
+            }
 
-        let input = input.trim().to_string();
-        let output = output.trim().to_string();
-        let is_visible = match is_visible.trim() {
-            "true" => true,
-            "false" => false,
-            _ => unreachable!(),
-        };
-        let question_id = Uuid::from_str(question_id.trim())?;
+            let file = file.expect("Failed to read input file");
+            let file_path = file.path();
+            let file_name = file_path.file_name().expect("Failed to take file name");
 
-        Ok(TestCase {
-            input,
-            output,
-            is_visible,
-            question_id,
-        })
+            let input_contents =
+                fs::read_to_string(&file_path).expect("Failed to read from input file");
+            let input_contents = input_contents.trim();
+
+            let out_files_path = if !extension {
+                out_dir.join(file_name)
+            } else {
+                let file_name = file_path.file_stem().unwrap().to_str().unwrap();
+                out_dir.join(format!("{}.out", file_name))
+            };
+            let output_contents =
+                fs::read_to_string(out_files_path).expect("Cannot read from output file");
+            let output_contents = output_contents.trim();
+
+            test_cases.push(Self {
+                input: input_contents.to_string(),
+                output: output_contents.to_string(),
+                is_visible: is_visible,
+                question_id: Uuid::from_str(quesiton_id.trim())?,
+            });
+        }
+        Ok(test_cases)
     }
 }
 
@@ -69,21 +99,22 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer().pretty())
         .init();
 
+    let test_cases =
+        TestCase::get_testcase_from_dir(&TEST_PATH.as_str(), &QUESTION_ID.as_str(), true)
+            .expect("Cannot get testcases!");
+
+    println!("{:?}", test_cases);
+
     let pool = PgPool::connect(&DATABASE_URL).await.unwrap();
 
-    let args: Vec<String> = env::args().collect();
-    let test_case_dir_name = &args[1];
-    for test_case_file in fs::read_dir(test_case_dir_name).unwrap() {
-        let test_case_file_name = test_case_file.unwrap().path();
-        let test_case_raw = fs::read_to_string(test_case_file_name).unwrap();
-        let test_case = TestCase::from_str(&test_case_raw).unwrap();
+    for test_case in test_cases {
         eprintln!("DEBUGPRINT[1]: main.rs:81: test_case={:#?}", test_case);
 
         sqlx::query!(
             r#"
-INSERT INTO test_cases(question_id, input, output, is_visible)
-VALUES ($1, $2, $3, $4)
-        "#,
+                INSERT INTO test_cases(question_id, input, output, is_visible)
+                VALUES ($1, $2, $3, $4)
+                "#,
             test_case.question_id,
             test_case.input,
             test_case.output,
